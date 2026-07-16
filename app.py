@@ -107,6 +107,27 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     letter-spacing:.06em; margin:1.4rem 0 .6rem; padding-bottom:.35rem; border-bottom:2px solid #ef5350; }
 .disclaimer { background:#f5f5f5; border-radius:8px; padding:.8rem 1rem;
     font-size:.8rem; color:#757575; margin-top:1rem; }
+
+/* ── Per-prediction XAI styles ── */
+.xai-section { background:#fff; border:1px solid #e0e0e0; border-radius:14px;
+    padding:1.5rem; margin-top:1.5rem; }
+.xai-title { font-size:1rem; font-weight:700; color:#212121; margin-bottom:1rem; }
+.xai-row { display:flex; align-items:center; gap:.75rem; margin-bottom:.55rem; }
+.xai-label { font-size:.82rem; font-weight:500; color:#444; width:200px; flex-shrink:0;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.xai-bar-wrap { flex:1; background:#f5f5f5; border-radius:6px; height:22px;
+    overflow:hidden; position:relative; }
+.xai-bar-pos { height:100%; border-radius:6px;
+    background:linear-gradient(90deg,#ef9a9a,#ef5350); }
+.xai-bar-neg { height:100%; border-radius:6px;
+    background:linear-gradient(90deg,#26c6da,#0097a7); }
+.xai-val { font-size:.78rem; font-weight:600; width:55px; text-align:right; flex-shrink:0; }
+.xai-val-pos { color:#c62828; }
+.xai-val-neg { color:#00838f; }
+.xai-legend { display:flex; gap:1.5rem; font-size:.75rem; color:#757575; margin-top:.75rem; }
+.xai-legend span { display:flex; align-items:center; gap:.35rem; }
+.xai-dot-pos { width:10px;height:10px;border-radius:50%;background:#ef5350;display:inline-block; }
+.xai-dot-neg { width:10px;height:10px;border-radius:50%;background:#26c6da;display:inline-block; }
 .ens-badge { background:#ffcdd2; color:#b71c1c; font-size:.72rem; font-weight:700;
     padding:2px 8px; border-radius:5px; margin-left:6px; }
 </style>
@@ -119,17 +140,25 @@ def load_artifacts():
     fn  = joblib.load("models/feature_names.pkl")
     with open("models/best_model_name.txt") as f:
         name = f.read().strip()
-    # Normalise: if it's an ensemble dict, extract clf + scaler
+    # Load SHAP explainer and scaler for per-prediction XAI
+    try:
+        explainer = joblib.load("models/shap_explainer.pkl")
+        scaler    = joblib.load("models/scaler.pkl")
+    except FileNotFoundError:
+        explainer = None
+        scaler    = None
     if isinstance(raw, dict):
-        return raw["clf"], raw["scaler"], fn, name, True
+        return raw["clf"], raw["scaler"], fn, name, True, explainer, scaler
     else:
-        return raw, None, fn, name, False
+        return raw, None, fn, name, False, explainer, scaler
 
 try:
-    model, ens_scaler, feature_names, best_model_name, is_ensemble = load_artifacts()
+    model, ens_scaler, feature_names, best_model_name, is_ensemble, shap_explainer, rf_scaler = load_artifacts()
     model_loaded = True
 except FileNotFoundError:
     model_loaded = False
+    shap_explainer = None
+    rf_scaler      = None
 
 # ── Option maps ───────────────────────────────────────────────
 SEX_OPTIONS     = {"Male": 1, "Female": 0}
@@ -282,8 +311,77 @@ if page == "Predict":
             st.dataframe(pd.DataFrame(rows, columns=["Parameter","Value"]),
                          use_container_width=True, hide_index=True)
 
-        st.markdown("""<div class="disclaimer">⚠️ <strong>Disclaimer:</strong> This tool is for
-        educational purposes only. Always consult a qualified healthcare professional.</div>""",
+        # ── Per-prediction SHAP XAI ──────────────────────
+        if shap_explainer is not None and rf_scaler is not None:
+            st.divider()
+            st.subheader("🔍 Why this prediction? — Explainable AI (SHAP)")
+            st.caption("SHAP values show how much each feature pushed the prediction "
+                       "toward Heart Disease (🔴 red) or away from it (🔵 blue).")
+            try:
+                X_shap = rf_scaler.transform(
+                    np.array([input_values[f] for f in feature_names]).reshape(1, -1))
+                sv   = shap_explainer.shap_values(X_shap)
+                sv_arr = np.array(sv)
+                # Handle all SHAP output shapes robustly
+                if sv_arr.ndim == 3:
+                    # (n_samples, n_features, n_classes) — take class 1
+                    vals = sv_arr[0, :, 1]
+                elif isinstance(sv, list):
+                    # list of [class0_array, class1_array]
+                    vals = np.array(sv[1])[0]
+                else:
+                    vals = sv_arr[0]
+
+                FEAT_LABELS = {
+                    "age":"Age","sex":"Sex","chest_pain_type":"Chest Pain Type",
+                    "resting_bp_s":"Resting Blood Pressure","cholesterol":"Serum Cholesterol",
+                    "fasting_blood_sugar":"Fasting Blood Sugar","resting_ecg":"Resting ECG",
+                    "max_heart_rate":"Max Heart Rate","exercise_angina":"Exercise Angina",
+                    "oldpeak":"ST Depression (Oldpeak)","st_slope":"ST Slope",
+                }
+                feat_labels = [FEAT_LABELS.get(f, f) for f in feature_names]
+                order   = np.argsort(np.abs(vals))[::-1]
+                max_abs = max(np.abs(vals)) if max(np.abs(vals)) > 0 else 1.0
+
+                bars_html = '<div class="xai-section"><div class="xai-title">Feature Contributions to This Prediction</div>'
+                for i in order:
+                    v       = float(vals[i])
+                    label   = feat_labels[i]
+                    pct_w   = min(int(abs(v) / max_abs * 100), 100)
+                    val_cls = "xai-val-pos" if v > 0 else "xai-val-neg"
+                    bar_cls = "xai-bar-pos" if v > 0 else "xai-bar-neg"
+                    bars_html += (
+                        f'<div class="xai-row">'
+                        f'<div class="xai-label" title="{label}">{label}</div>'
+                        f'<div class="xai-bar-wrap"><div class="{bar_cls}" style="width:{pct_w}%"></div></div>'
+                        f'<div class="xai-val {val_cls}">{v:+.3f}</div>'
+                        f'</div>'
+                    )
+                bars_html += (
+                    '<div class="xai-legend">'
+                    '<span><span class="xai-dot-pos"></span> Increases heart disease risk</span>'
+                    '<span><span class="xai-dot-neg"></span> Reduces heart disease risk</span>'
+                    '</div></div>'
+                )
+                st.markdown(bars_html, unsafe_allow_html=True)
+
+                st.markdown("#### 📝 In Plain English — Top 3 Reasons")
+                input_vals_list = [input_values[f] for f in feature_names]
+                for i in order[:3]:
+                    v         = float(vals[i])
+                    label     = feat_labels[i]
+                    entered   = input_vals_list[i]
+                    direction = "increased" if v > 0 else "reduced"
+                    strength  = "strongly" if abs(v) > 0.1 else "slightly"
+                    st.markdown(
+                        f"- **{label}** (entered: `{entered}`) {strength} **{direction}** "
+                        f"the heart disease risk `({v:+.3f})`"
+                    )
+            except Exception as e:
+                st.info(f"SHAP explanation unavailable for this input: {e}")
+
+        st.markdown('''<div class="disclaimer">⚠️ <strong>Disclaimer:</strong> This tool is for
+        educational purposes only. Always consult a qualified healthcare professional.</div>''',
                     unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════
