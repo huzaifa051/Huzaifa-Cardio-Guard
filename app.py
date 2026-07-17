@@ -415,25 +415,24 @@ elif page == "Analytics":
     if not all(os.path.exists(p) for _, p in IMAGES):
         st.warning("⚠️ Some charts missing. Run `python train_model.py` to regenerate.")
 
+    # Row 1: two small charts side by side
     c1, c2 = st.columns(2)
     for col, (title, path) in zip([c1, c2], IMAGES[:2]):
         with col:
             st.subheader(title)
+            if os.path.exists(path):
+                st.image(path, use_container_width=True)
+            else:
+                st.info("Not yet generated.")
 
+    # Remaining charts: full width with divider
+    for title, path in IMAGES[2:]:
+        st.subheader(title)
         if os.path.exists(path):
             st.image(path, use_container_width=True)
         else:
             st.info("Not yet generated.")
-
-    for title, path in IMAGES[2:]:
-        st.subheader(title)
-
-    if os.path.exists(path):
-        st.image(path, use_container_width=True)
-    else:
-        st.info("Not yet generated.")
-
-    st.divider()
+        st.divider()
 
 # ══════════════════════════════════════════════════════════════
 # PAGE — XAI (Explainable AI)
